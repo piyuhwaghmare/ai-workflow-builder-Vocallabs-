@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { gql } from '@apollo/client/core'; 
-import { useMutation } from '@apollo/client/react';
+import { gql } from '@apollo/client/core';
+import { useMutation, useSubscription } from '@apollo/client/react';
+import './WorkflowRunner.css';
 
-// 1. Trigger Mutation
-const TRIGGER_WORKFLOW_MUTATION = gql`
+// Matches the Hasura Action registered from triggerWorkflowRun.js
+const TRIGGER_WORKFLOW = gql`
   mutation TriggerWorkflow($workflow_id: uuid!) {
     triggerWorkflowRun(workflow_id: $workflow_id) {
       success
@@ -13,93 +14,159 @@ const TRIGGER_WORKFLOW_MUTATION = gql`
   }
 `;
 
-// 2. Approve/Reject Mutation
-const APPROVE_WORKFLOW_MUTATION = gql`
-  mutation ApproveWorkflowRun($workflow_run_id: uuid!, $approved: Boolean!) {
-    approveWorkflowRun(workflow_run_id: $workflow_run_id, approved: $approved) {
+// Matches the Hasura Action registered from approveStep.js — note it takes
+// step_run_id, not workflow_run_id, since approval applies to one specific
+// paused step.
+const APPROVE_STEP = gql`
+  mutation ApproveStep($step_run_id: uuid!) {
+    approveStep(step_run_id: $step_run_id) {
       success
       status
-      message
+      workflow_run_id
     }
   }
 `;
 
+// Live feed for a single run — split into two subscriptions because
+// Hasura requires exactly one top-level field per subscription.
+const STEP_RUNS_SUBSCRIPTION = gql`
+  subscription WatchStepRuns($workflow_run_id: uuid!) {
+    step_runs(
+      where: { workflow_run_id: { _eq: $workflow_run_id } }
+      order_by: { step_order: asc }
+    ) {
+      id
+      step_order
+      type
+      status
+      output
+      error
+      attempt_count
+      approved_by
+      approved_at
+    }
+  }
+`;
+
+const RUN_STATUS_SUBSCRIPTION = gql`
+  subscription WatchRunStatus($workflow_run_id: uuid!) {
+    workflow_runs_by_pk(id: $workflow_run_id) {
+      id
+      status
+      current_step_order
+    }
+  }
+`;
+
+const STATUS_META = {
+  pending: { label: 'Queued', tone: 'muted' },
+  running: { label: 'Running', tone: 'teal' },
+  paused: { label: 'Paused', tone: 'amber' },
+  completed: { label: 'Done', tone: 'green' },
+  failed: { label: 'Failed', tone: 'red' },
+};
+
+function StatusPill({ status }) {
+  const meta = STATUS_META[status] || { label: status, tone: 'muted' };
+  return <span className={`pill pill--${meta.tone}`}>{meta.label}</span>;
+}
+
 export default function WorkflowRunner({ workflowId }) {
-  const [runState, setRunState] = useState({ runId: null, status: null });
+  const [runId, setRunId] = useState(null);
 
-  const [triggerWorkflow, { loading: triggerLoading }] = useMutation(TRIGGER_WORKFLOW_MUTATION);
-  const [approveWorkflow, { loading: approveLoading }] = useMutation(APPROVE_WORKFLOW_MUTATION);
+  const [triggerWorkflow, { loading: triggering }] = useMutation(TRIGGER_WORKFLOW);
+  const [approveStep, { loading: approving }] = useMutation(APPROVE_STEP);
 
-  // Handle Initial Run
-  const handleRunClick = async () => {
+  const { data: stepData } = useSubscription(STEP_RUNS_SUBSCRIPTION, {
+    variables: { workflow_run_id: runId },
+    skip: !runId,
+  });
+
+  const { data: runData } = useSubscription(RUN_STATUS_SUBSCRIPTION, {
+    variables: { workflow_run_id: runId },
+    skip: !runId,
+  });
+
+  const steps = stepData?.step_runs ?? [];
+  const runStatus = runData?.workflow_runs_by_pk?.status ?? null;
+  const pausedStep = steps.find((s) => s.status === 'paused');
+
+  async function handleRun() {
     try {
-      const response = await triggerWorkflow({
-        variables: { workflow_id: workflowId },
-      });
-      const res = response.data.triggerWorkflowRun;
-      setRunState({ runId: res.workflow_run_id, status: res.status });
+      const { data } = await triggerWorkflow({ variables: { workflow_id: workflowId } });
+      setRunId(data.triggerWorkflowRun.workflow_run_id);
     } catch (err) {
-      alert("Failed to start: " + err.message);
+      alert('Failed to start run: ' + err.message);
     }
-  };
+  }
 
-  // Handle Human Approval Gate
-  const handleApproval = async (isApproved) => {
+  async function handleApprove(stepRunId) {
     try {
-      const response = await approveWorkflow({
-        variables: { workflow_run_id: runState.runId, approved: isApproved },
-      });
-      const res = response.data.approveWorkflowRun;
-      setRunState((prev) => ({ ...prev, status: res.status }));
+      await approveStep({ variables: { step_run_id: stepRunId } });
     } catch (err) {
-      alert("Action failed: " + err.message);
+      alert('Approval failed: ' + err.message);
     }
-  };
+  }
 
   return (
-    <div style={{ padding: '20px', border: '1px solid #ccc', borderRadius: '8px', margin: '20px', maxWidth: '400px' }}>
-      <h3>Run this Workflow</h3>
+    <div className="runner">
+      <div className="runner-header">
+        <div>
+          <p className="runner-eyebrow">Manual trigger</p>
+          <h2 className="runner-title">Run this workflow</h2>
+        </div>
+        <button className="run-button" onClick={handleRun} disabled={triggering || runStatus === 'running'}>
+          {triggering ? 'Starting…' : '▶ Run workflow'}
+        </button>
+      </div>
 
-      {/* Start Button */}
-      <button onClick={handleRunClick} disabled={triggerLoading}>
-        {triggerLoading ? 'Starting...' : '▶ Run Workflow'}
-      </button>
+      {runId && (
+        <div className="runner-body">
+          <div className="runner-track-header">
+            <span className="track-label">Run status</span>
+            {runStatus && <StatusPill status={runStatus} />}
+          </div>
 
-      {/* Status Badges & Approval Controls */}
-      {runState.status && (
-        <div style={{ marginTop: '15px' }}>
-          <p>Status: <strong>{runState.status.toUpperCase()}</strong></p>
+          <ol className="track">
+            {steps.map((step, i) => (
+              <li key={step.id} className={`track-node track-node--${STATUS_META[step.status]?.tone || 'muted'}`}>
+                <div className="track-node-marker">
+                  {step.status === 'completed' ? '✓' : step.status === 'failed' ? '✕' : i + 1}
+                </div>
+                <div className="track-node-body">
+                  <div className="track-node-top">
+                    <span className="track-node-type">{step.type}</span>
+                    <StatusPill status={step.status} />
+                  </div>
+                  {step.attempt_count > 1 && (
+                    <p className="track-node-meta">Retried — attempt {step.attempt_count}</p>
+                  )}
+                  {step.error && <p className="track-node-error">{step.error}</p>}
+                  {step.approved_by && (
+                    <p className="track-node-meta">Approved {new Date(step.approved_at).toLocaleTimeString()}</p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
 
-          {/* Conditional Approval UI when status is 'paused' */}
-          {runState.status === 'paused' && (
-            <div style={{ border: '1px solid #f59e0b', padding: '10px', borderRadius: '6px', backgroundColor: '#fffbeb' }}>
-              <p style={{ margin: '0 0 10px 0', color: '#b45309' }}>⚠️ Approval Gate Reached</p>
-              <div style={{ display: 'flex', gap: '10px' }}>
-                <button 
-                  onClick={() => handleApproval(true)} 
-                  disabled={approveLoading}
-                  style={{ backgroundColor: '#16a34a', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '4px', cursor: 'pointer' }}
-                >
-                  ✓ Approve (Green Mark)
-                </button>
-                <button 
-                  onClick={() => handleApproval(false)} 
-                  disabled={approveLoading}
-                  style={{ backgroundColor: '#dc2626', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '4px', cursor: 'pointer' }}
-                >
-                  ✕ Reject
-                </button>
-              </div>
+          {pausedStep && (
+            <div className="approval-box">
+              <p className="approval-box-label">
+                Awaiting approval — step {pausedStep.step_order} ({pausedStep.type})
+              </p>
+              <button
+                className="approve-button"
+                onClick={() => handleApprove(pausedStep.id)}
+                disabled={approving}
+              >
+                {approving ? 'Approving…' : '✓ Approve and resume'}
+              </button>
             </div>
           )}
 
-          {/* Final Status Display */}
-          {runState.status === 'completed' && (
-            <p style={{ color: '#16a34a', fontWeight: 'bold' }}>✅ Workflow Execution Completed!</p>
-          )}
-          {runState.status === 'failed' && (
-            <p style={{ color: '#dc2626', fontWeight: 'bold' }}>❌ Workflow Execution Rejected / Failed</p>
-          )}
+          {runStatus === 'completed' && <p className="final-msg final-msg--green">Run completed.</p>}
+          {runStatus === 'failed' && <p className="final-msg final-msg--red">Run failed.</p>}
         </div>
       )}
     </div>

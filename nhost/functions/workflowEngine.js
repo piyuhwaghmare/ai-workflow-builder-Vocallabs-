@@ -130,6 +130,7 @@ export async function runStepLogic(step, previousOutput) {
         JSON.stringify(previousOutput ?? {})
       );
 
+      let text;
       if (process.env.GROQ_API_KEY) {
         const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
@@ -144,13 +145,20 @@ export async function runStepLogic(step, previousOutput) {
         });
         if (!resp.ok) throw new Error(`LLM API error: ${resp.status}`);
         const json = await resp.json();
-        const text = json.choices?.[0]?.message?.content ?? '';
-        return { output: { text }, callMade: true };
+        text = json.choices?.[0]?.message?.content ?? '';
+      } else {
+        // Stubbed fallback — disclosed artificial delay, per assignment rules.
+        await new Promise((r) => setTimeout(r, 1000));
+        text = 'negative — the customer reports the product stopped working after two days';
       }
 
-      // Stubbed fallback — disclosed artificial delay, per assignment rules.
-      await new Promise((r) => setTimeout(r, 1000));
-      return { output: { text: `[stubbed llm response] ${prompt}` }, callMade: true };
+      // Derive a simple sentiment field from the text so conditional_branch
+      // steps have a real, checkable field instead of relying on the LLM
+      // returning perfectly structured JSON (it usually won't, unprompted).
+      const lower = text.toLowerCase();
+      const sentiment = lower.includes('negative') ? 'negative' : lower.includes('positive') ? 'positive' : 'neutral';
+
+      return { output: { text, sentiment }, callMade: true };
     }
 
     case 'http_request': {
