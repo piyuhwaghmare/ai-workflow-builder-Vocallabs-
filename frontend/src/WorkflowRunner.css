@@ -230,8 +230,30 @@
 
 .final-msg--green { color: var(--green); }
 .final-msg--red { color: var(--red); }
-/* Add this rule to WorkflowRunner.css, next to .final-msg--green/.final-msg--red */
+
+/* Add these rules to WorkflowRunner.css */
 .final-msg--amber { color: var(--amber); }
+
+.approval-box-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.reject-button {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  padding: 9px 14px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.reject-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 @media (max-width: 480px) {
   .runner {

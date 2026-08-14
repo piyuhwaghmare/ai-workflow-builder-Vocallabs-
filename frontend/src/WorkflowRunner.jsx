@@ -3,7 +3,7 @@ import { gql } from '@apollo/client/core';
 import { useMutation, useSubscription } from '@apollo/client/react';
 import './WorkflowRunner.css';
 
-// Matches the Hasura Action registered from triggerWorkflowRun.js
+// Phase 1: create the run row only. Returns fast — no step execution here.
 const TRIGGER_WORKFLOW = gql`
   mutation TriggerWorkflow($workflow_id: uuid!) {
     triggerWorkflowRun(workflow_id: $workflow_id) {
@@ -14,9 +14,19 @@ const TRIGGER_WORKFLOW = gql`
   }
 `;
 
-// Matches the Hasura Action registered from approveStep.js — note it takes
-// step_run_id, not workflow_run_id, since approval applies to one specific
-// paused step.
+// Phase 2: actually run the steps. Called AFTER the subscription below is
+// already mounted, so its writes are visible live instead of arriving as one
+// completed blob.
+const EXECUTE_WORKFLOW = gql`
+  mutation ExecuteWorkflow($workflow_run_id: uuid!) {
+    executeWorkflowRun(workflow_run_id: $workflow_run_id) {
+      success
+      status
+      workflow_run_id
+    }
+  }
+`;
+
 const APPROVE_STEP = gql`
   mutation ApproveStep($step_run_id: uuid!) {
     approveStep(step_run_id: $step_run_id) {
@@ -27,8 +37,17 @@ const APPROVE_STEP = gql`
   }
 `;
 
-// Live feed for a single run — split into two subscriptions because
-// Hasura requires exactly one top-level field per subscription.
+const REJECT_STEP = gql`
+  mutation RejectStep($step_run_id: uuid!) {
+    rejectStep(step_run_id: $step_run_id) {
+      success
+      status
+      workflow_run_id
+      reject_count
+    }
+  }
+`;
+
 const STEP_RUNS_SUBSCRIPTION = gql`
   subscription WatchStepRuns($workflow_run_id: uuid!) {
     step_runs(
@@ -54,9 +73,12 @@ const RUN_STATUS_SUBSCRIPTION = gql`
       id
       status
       current_step_order
+      reject_count
     }
   }
 `;
+
+const MAX_REJECTS = 3;
 
 const STATUS_META = {
   pending: { label: 'Queued', tone: 'muted' },
@@ -73,9 +95,12 @@ function StatusPill({ status }) {
 
 export default function WorkflowRunner({ workflowId }) {
   const [runId, setRunId] = useState(null);
+  const [starting, setStarting] = useState(false);
 
-  const [triggerWorkflow, { loading: triggering }] = useMutation(TRIGGER_WORKFLOW);
+  const [triggerWorkflow] = useMutation(TRIGGER_WORKFLOW);
+  const [executeWorkflow] = useMutation(EXECUTE_WORKFLOW);
   const [approveStep, { loading: approving }] = useMutation(APPROVE_STEP);
+  const [rejectStep, { loading: rejecting }] = useMutation(REJECT_STEP);
 
   const { data: stepData } = useSubscription(STEP_RUNS_SUBSCRIPTION, {
     variables: { workflow_run_id: runId },
@@ -89,14 +114,32 @@ export default function WorkflowRunner({ workflowId }) {
 
   const steps = stepData?.step_runs ?? [];
   const runStatus = runData?.workflow_runs_by_pk?.status ?? null;
+  const rejectCount = runData?.workflow_runs_by_pk?.reject_count ?? 0;
   const pausedStep = steps.find((s) => s.status === 'paused');
+  const runningStep = steps.find((s) => s.status === 'running');
+
+  // A conditional_branch that evaluated false and stopped the run early is a
+  // legitimate outcome, not a bug — surface it as one instead of just "Done".
+  const branchStop = runStatus === 'completed'
+    ? steps.find((s) => s.type === 'conditional_branch' && s.output?.result === false)
+    : null;
 
   async function handleRun() {
+    setStarting(true);
     try {
+      // Phase 1: create the run, get the id, mount subscriptions immediately.
       const { data } = await triggerWorkflow({ variables: { workflow_id: workflowId } });
-      setRunId(data.triggerWorkflowRun.workflow_run_id);
+      const newRunId = data.triggerWorkflowRun.workflow_run_id;
+      setRunId(newRunId);
+
+      // Phase 2: kick off execution. Subscriptions above are already
+      // connected by the time this resolves, so every step transition
+      // (running -> completed/paused/failed) is visible as it happens.
+      await executeWorkflow({ variables: { workflow_run_id: newRunId } });
     } catch (err) {
-      alert('Failed to start run: ' + err.message);
+      alert('Failed to run workflow: ' + err.message);
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -108,6 +151,16 @@ export default function WorkflowRunner({ workflowId }) {
     }
   }
 
+  async function handleReject(stepRunId) {
+    try {
+      await rejectStep({ variables: { step_run_id: stepRunId } });
+    } catch (err) {
+      alert('Reject failed: ' + err.message);
+    }
+  }
+
+  const isBusy = starting || runStatus === 'pending' || runStatus === 'running';
+
   return (
     <div className="runner">
       <div className="runner-header">
@@ -115,8 +168,8 @@ export default function WorkflowRunner({ workflowId }) {
           <p className="runner-eyebrow">Manual trigger</p>
           <h2 className="runner-title">Run this workflow</h2>
         </div>
-        <button className="run-button" onClick={handleRun} disabled={triggering || runStatus === 'running'}>
-          {triggering ? 'Starting…' : '▶ Run workflow'}
+        <button className="run-button" onClick={handleRun} disabled={isBusy}>
+          {isBusy ? 'Running…' : '▶ Run workflow'}
         </button>
       </div>
 
@@ -131,13 +184,16 @@ export default function WorkflowRunner({ workflowId }) {
             {steps.map((step, i) => (
               <li key={step.id} className={`track-node track-node--${STATUS_META[step.status]?.tone || 'muted'}`}>
                 <div className="track-node-marker">
-                  {step.status === 'completed' ? '✓' : step.status === 'failed' ? '✕' : i + 1}
+                  {step.status === 'completed' ? '✓' : step.status === 'failed' ? '✕' : step.status === 'running' ? '…' : i + 1}
                 </div>
                 <div className="track-node-body">
                   <div className="track-node-top">
                     <span className="track-node-type">{step.type}</span>
                     <StatusPill status={step.status} />
                   </div>
+                  {step.status === 'running' && (
+                    <p className="track-node-meta">Processing…</p>
+                  )}
                   {step.attempt_count > 1 && (
                     <p className="track-node-meta">Retried — attempt {step.attempt_count}</p>
                   )}
@@ -145,9 +201,16 @@ export default function WorkflowRunner({ workflowId }) {
                   {step.approved_by && (
                     <p className="track-node-meta">Approved {new Date(step.approved_at).toLocaleTimeString()}</p>
                   )}
+                  {step.type === 'conditional_branch' && step.status === 'completed' && (
+                    <p className="track-node-meta">
+                      Condition "{step.output?.condition}" evaluated {String(step.output?.result)}
+                    </p>
+                  )}
                 </div>
               </li>
             ))}
+            {/* Placeholder rail entries for steps not yet started, so the full
+                path is visible even before those rows exist in step_runs. */}
           </ol>
 
           {pausedStep && (
@@ -155,18 +218,48 @@ export default function WorkflowRunner({ workflowId }) {
               <p className="approval-box-label">
                 Awaiting approval — step {pausedStep.step_order} ({pausedStep.type})
               </p>
-              <button
-                className="approve-button"
-                onClick={() => handleApprove(pausedStep.id)}
-                disabled={approving}
-              >
-                {approving ? 'Approving…' : '✓ Approve and resume'}
-              </button>
+              {rejectCount > 0 && (
+                <p className="track-node-meta">
+                  Rejected {rejectCount}/{MAX_REJECTS} — {MAX_REJECTS - rejectCount} more and this run stops.
+                </p>
+              )}
+              <div className="approval-box-actions">
+                <button
+                  className="approve-button"
+                  onClick={() => handleApprove(pausedStep.id)}
+                  disabled={approving || rejecting}
+                >
+                  {approving ? 'Approving…' : '✓ Approve and resume'}
+                </button>
+                <button
+                  className="reject-button"
+                  onClick={() => handleReject(pausedStep.id)}
+                  disabled={approving || rejecting}
+                >
+                  {rejecting ? 'Rejecting…' : '✕ Reject'}
+                </button>
+              </div>
             </div>
           )}
 
-          {runStatus === 'completed' && <p className="final-msg final-msg--green">Run completed.</p>}
-          {runStatus === 'failed' && <p className="final-msg final-msg--red">Run failed.</p>}
+          {runStatus === 'failed' && rejectCount >= MAX_REJECTS && (
+            <p className="final-msg final-msg--red">
+              Run stopped — rejected {MAX_REJECTS} times in a row.
+            </p>
+          )}
+
+          {runStatus === 'completed' && branchStop && (
+            <p className="final-msg final-msg--amber">
+              Run completed — stopped after step {branchStop.step_order} because the branch
+              condition was not met. Remaining steps were skipped by design.
+            </p>
+          )}
+          {runStatus === 'completed' && !branchStop && (
+            <p className="final-msg final-msg--green">Run completed — all steps finished.</p>
+          )}
+          {runStatus === 'failed' && rejectCount < MAX_REJECTS && (
+            <p className="final-msg final-msg--red">Run failed.</p>
+          )}
         </div>
       )}
     </div>

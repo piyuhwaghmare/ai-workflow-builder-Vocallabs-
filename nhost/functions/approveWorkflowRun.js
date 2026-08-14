@@ -1,8 +1,10 @@
 // approveStep.js
 // Hasura Action handler: POST /approveStep
 // Input: { step_run_id }
-// Checks the approver's role in the OWNING org (Layer 2 — this cannot be a plain
-// database permission because it's a mid-execution decision), then resumes the run.
+// Checks the approver's role in the OWNING org (Layer 2), then resumes the run.
+// CHANGED: also resets workflow_runs.reject_count to 0 on approval, since the
+// "3 rejects in a row" rule (see rejectStep.js) is about a consecutive streak,
+// not a lifetime total.
 
 import { gql, resumeRun, executeStepsFrom } from './workflowEngine.js';
 
@@ -29,7 +31,6 @@ export default async function approveStep(req, res) {
   }
 
   try {
-    // STEP 1: Fetch the paused step_run, its run, its workflow, its org, and the caller's role
     const query = `
       query GetStepRunContext($step_run_id: uuid!, $user_id: uuid!) {
         step_runs_by_pk(id: $step_run_id) {
@@ -75,10 +76,7 @@ export default async function approveStep(req, res) {
     const org = workflow.organization;
     const members = org.org_members || [];
 
-    // STEP 2: Layer 2 permission check — only owner/editor IN THIS ORG may approve.
-    // This is what stops an Org B user from approving Org A's gate even with a guessed ID:
-    // they will have zero matching rows in org_members for org A, regardless of their
-    // role in their own org.
+    // Layer 2 permission check — only owner/editor IN THIS ORG may approve.
     if (members.length === 0) {
       return res.status(403).json({ message: 'Forbidden: You are not a member of this organization.' });
     }
@@ -87,7 +85,7 @@ export default async function approveStep(req, res) {
       return res.status(403).json({ message: 'Forbidden: Viewers cannot approve workflow steps.' });
     }
 
-    // STEP 3: Mark this step_run as approved + completed
+    // Mark this step_run as approved + completed
     const approveMutation = `
       mutation ApproveStep($id: uuid!, $approved_by: uuid!) {
         update_step_runs_by_pk(
@@ -103,7 +101,15 @@ export default async function approveStep(req, res) {
     `;
     await gql(approveMutation, { id: step_run_id, approved_by: userId });
 
-    // STEP 4: Flip the run back to "running" and resume execution after this step
+    // Reset the reject streak — an approval breaks any run of consecutive rejects.
+    await gql(
+      `mutation ResetRejectCount($run_id: uuid!) {
+        update_workflow_runs_by_pk(pk_columns: { id: $run_id }, _set: { reject_count: 0 }) { id }
+      }`,
+      { run_id: workflowRun.id }
+    );
+
+    // Flip the run back to "running" and resume execution after this step
     await resumeRun(workflowRun.id);
 
     const steps = workflow.workflow_steps || [];
@@ -114,7 +120,7 @@ export default async function approveStep(req, res) {
       startIndex: resumeIndex,
       workflowRunId: workflowRun.id,
       org,
-      previousOutput: null // the approval_gate step itself has no meaningful output to pass on
+      previousOutput: null
     });
 
     return res.status(200).json({
