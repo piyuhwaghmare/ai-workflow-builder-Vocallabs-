@@ -11,7 +11,7 @@ export default async function triggerWorkflowRun(req, res) {
   const ADMIN_SECRET = process.env.NHOST_ADMIN_SECRET || 'piyush12345';
 
   try {
-    const { workflow_id } = req.body?.input?.workflow_id;
+    const { workflow_id } = body?.input?.workflow_id || body?.input?.workflowId || body?.workflow_id;
     const userId = req.body?.session_variables?.['x-hasura-user-id'];
 
     if (!userId) {
