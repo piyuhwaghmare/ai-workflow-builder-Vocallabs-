@@ -10,13 +10,6 @@ export default async function triggerWorkflowRun(req, res) {
   const GRAPHQL_URL = process.env.NHOST_GRAPHQL_URL || 'https://dhvcevimcsijoxrocwet.graphql.ap-south-1.nhost.run/v1';
   const ADMIN_SECRET = process.env.NHOST_ADMIN_SECRET || 'piyush12345';
 
-  let body = {};
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-  } catch (e) {
-    body = req.body || {};
-  }
-
   try {
     const { workflow_id } = body?.input?.workflow_id || body?.input?.workflowId || body?.workflow_id;
     const userId = req.body?.session_variables?.['x-hasura-user-id'];
