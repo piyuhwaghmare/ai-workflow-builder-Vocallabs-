@@ -1,5 +1,5 @@
 // workflowEngine.js
-// Shared logic used by BOTH Action handlers: triggerWorkflowRun.js and approveStep.js
+// Shared logic used by BOTH Action handlers: executeWorkflowRun.js and approveStep.js
 // Keeping this in one place means "resume after approval" behaves identically to
 // "run from the start" — same retry rules, same step_runs bookkeeping, same quota logic.
 
@@ -215,14 +215,25 @@ function evaluateCondition(condition, previousOutput) {
 // (startIndex = 0) and for resuming after an approval_gate (startIndex = gate + 1).
 // `previousOutput` should be the output of the step immediately before startIndex
 // (null if starting from the very first step).
+// Small artificial pacing delay between steps, purely so the live subscription
+// UI has a visible "running" window per step instead of the whole run resolving
+// in under a second. Disclosed here rather than hidden — same idea as the
+// llm_call stub's delay. Set STEP_PACING_MS=0 to disable.
+const STEP_PACING_MS = Number(process.env.STEP_PACING_MS ?? 900);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, previousOutput }) {
   let callsMade = 0;
   let isPaused = false;
   let isFailed = false;
+  let stoppedEarly = false;
 
   for (let i = startIndex; i < steps.length; i++) {
     const step = steps[i];
     const stepRunId = await createStepRun(workflowRunId, step, previousOutput);
+    // "running" row is now visible to subscribers — hold here briefly before
+    // doing the actual work so the UI has time to render the transition.
+    if (STEP_PACING_MS > 0) await sleep(STEP_PACING_MS);
 
     if (step.type === 'approval_gate') {
       await pauseRunAt(workflowRunId, step.step_order);
@@ -262,6 +273,7 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
     previousOutput = output;
 
     if (step.type === 'conditional_branch' && output?.result === false) {
+      stoppedEarly = true;
       break;
     }
   }
@@ -271,6 +283,7 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
   }
 
   return {
-    status: isPaused ? 'paused' : isFailed ? 'failed' : 'completed'
+    status: isPaused ? 'paused' : isFailed ? 'failed' : 'completed',
+    stoppedEarly
   };
 }

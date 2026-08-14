@@ -1,9 +1,13 @@
 // triggerWorkflowRun.js
 // Hasura Action handler: POST /triggerWorkflowRun
-// Verifies caller role (owner/editor only), checks quota, creates a workflow_run,
-// then hands off execution to the shared engine.
+// CHANGED: this now ONLY verifies role + quota and creates the workflow_run row.
+// It does NOT execute steps anymore — that's executeWorkflowRun.js.
+// Why: the old version awaited the entire step loop before responding, so by
+// the time the frontend got a run_id and mounted its subscription, the run
+// had already finished. Splitting the call in two gives the frontend a window
+// to subscribe WHILE execution is still happening.
 
-import { gql, executeStepsFrom } from './workflowEngine.js';
+import { gql } from './workflowEngine.js';
 
 export default async function triggerWorkflowRun(req, res) {
   if (req.method !== 'POST') {
@@ -29,7 +33,6 @@ export default async function triggerWorkflowRun(req, res) {
   }
 
   try {
-    // STEP 1: Fetch workflow, org, caller's role, and steps
     const checkQuery = `
       query GetWorkflowData($workflow_id: uuid!, $user_id: uuid!) {
         workflows_by_pk(id: $workflow_id) {
@@ -41,12 +44,6 @@ export default async function triggerWorkflowRun(req, res) {
             org_members(where: { user_id: { _eq: $user_id } }) {
               role
             }
-          }
-          workflow_steps(order_by: { step_order: asc }) {
-            id
-            step_order
-            type
-            config
           }
         }
       }
@@ -61,7 +58,6 @@ export default async function triggerWorkflowRun(req, res) {
     const org = workflow.organization;
     const members = org.org_members || [];
 
-    // STEP 2: Layer 2 permission check — owner/editor only, not viewer
     if (members.length === 0) {
       return res.status(403).json({ message: 'Forbidden: You are not a member of this organization.' });
     }
@@ -70,19 +66,19 @@ export default async function triggerWorkflowRun(req, res) {
       return res.status(403).json({ message: 'Forbidden: Viewers cannot trigger workflow runs.' });
     }
 
-    // STEP 3: Quota check
     if (org.quota_used >= org.quota_limit) {
       return res.status(402).json({ message: 'Organization quota exceeded.' });
     }
 
-    // STEP 4: Create the workflow_run
+    // Status starts as "pending" — executeWorkflowRun flips it to "running"
+    // right before the first step, which the subscription WILL catch.
     const insertRunMutation = `
       mutation CreateRun($workflow_id: uuid!, $triggered_by: uuid!, $trigger_type: String!) {
         insert_workflow_runs_one(object: {
           workflow_id: $workflow_id,
           triggered_by: $triggered_by,
           trigger_type: $trigger_type,
-          status: "running"
+          status: "pending"
         }) { id }
       }
     `;
@@ -92,20 +88,10 @@ export default async function triggerWorkflowRun(req, res) {
       return res.status(500).json({ message: 'Failed to create workflow run.' });
     }
 
-    // STEP 5: Execute steps from the beginning
-    const steps = workflow.workflow_steps || [];
-    const result = await executeStepsFrom({
-      steps,
-      startIndex: 0,
-      workflowRunId,
-      org,
-      previousOutput: null
-    });
-
     return res.status(200).json({
       success: true,
       workflow_run_id: workflowRunId,
-      status: result.status
+      status: 'pending'
     });
   } catch (error) {
     console.error('Workflow trigger failed:', error);

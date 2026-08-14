@@ -230,6 +230,8 @@
 
 .final-msg--green { color: var(--green); }
 .final-msg--red { color: var(--red); }
+/* Add this rule to WorkflowRunner.css, next to .final-msg--green/.final-msg--red */
+.final-msg--amber { color: var(--amber); }
 
 @media (max-width: 480px) {
   .runner {
