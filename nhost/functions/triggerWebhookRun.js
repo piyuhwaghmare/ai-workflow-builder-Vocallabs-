@@ -58,19 +58,7 @@ export default async function triggerWebhookRun(req, res) {
     }
 
     if (trigger.config?.secret !== secret) {
-      // TEMPORARY debug info — remove before final submission. Shows exactly
-      // what was compared, since we can't see server console output directly.
-      return res.status(403).json({
-        message: 'Invalid webhook secret.',
-        debug: {
-          received_secret: secret,
-          received_secret_length: secret?.length,
-          stored_secret: trigger.config?.secret,
-          stored_secret_length: trigger.config?.secret?.length,
-          config_type: typeof trigger.config,
-          raw_config: trigger.config
-        }
-      });
+      return res.status(403).json({ message: 'Invalid webhook secret.' });
     }
 
     const org = workflow.organization;
