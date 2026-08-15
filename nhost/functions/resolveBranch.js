@@ -4,7 +4,6 @@
 // Called when a conditional_branch evaluated false and paused the run
 // (see workflowEngine.js).
 //
-// CHANGED BEHAVIOR:
 // - "ok" (Approve): the false condition is ignored — execution resumes and
 //   continues through the rest of the workflow normally.
 // - "reject": this is now a deliberate STOP. The run ends right here and is
@@ -13,6 +12,10 @@
 //   legitimate, user-chosen stopping point, not an error state.
 //
 // Same Layer 2 org-role check pattern as approveStep.js / rejectStep.js.
+//
+// CHANGED: completeRun no longer takes (orgId, callsMade) — quota is now
+// incremented per-step inside executeStepsFrom, so the reject path here
+// just calls completeRun(workflowRun.id).
 
 import { gql, completeRun, resumeRun, executeStepsFrom } from './workflowEngine.js';
 
@@ -144,7 +147,7 @@ export default async function resolveBranch(req, res) {
     );
 
     // No steps executed since the pause, so no additional quota calls to add.
-    await completeRun(workflowRun.id, org.id, 0);
+    await completeRun(workflowRun.id);
 
     return res.status(200).json({
       success: true,

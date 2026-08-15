@@ -2,6 +2,14 @@
 // Shared logic used by BOTH Action handlers: executeWorkflowRun.js and approveStep.js
 // Keeping this in one place means "resume after approval" behaves identically to
 // "run from the start" — same retry rules, same step_runs bookkeeping, same quota logic.
+//
+// CHANGED: quota is now incremented per completed costed step (see
+// incrementQuota + its call inside executeStepsFrom), not batched at the end
+// via completeRun. This fixes undercounting when a run pauses (approval_gate,
+// branch-false) or fails after an earlier llm_call/http_request already ran —
+// previously that call's cost was silently never recorded. completeRun's
+// signature changed accordingly: it no longer takes orgId/callsMade, it only
+// marks the run finished.
 
 const GRAPHQL_URL = process.env.NHOST_GRAPHQL_URL;
 const ADMIN_SECRET = process.env.NHOST_ADMIN_SECRET;
@@ -92,20 +100,35 @@ export async function resumeRun(workflowRunId) {
   await gql(mutation, { run_id: workflowRunId });
 }
 
-export async function completeRun(workflowRunId, orgId, callsMade) {
+// ---------- quota ----------
+// Incremented per completed costed step (llm_call / http_request), right
+// where the cost is actually incurred — see executeStepsFrom below. This
+// means a paused or later-failed run still keeps whatever quota it already
+// spent, instead of losing it because the run never reached completeRun.
+export async function incrementQuota(orgId, amount = 1) {
   const mutation = `
-    mutation CompleteRun($run_id: uuid!, $org_id: uuid!, $inc: Int!) {
-      update_workflow_runs_by_pk(
-        pk_columns: { id: $run_id }
-        _set: { status: "completed", finished_at: "now()" }
-      ) { id }
+    mutation IncrementQuota($org_id: uuid!, $inc: Int!) {
       update_organizations_by_pk(
         pk_columns: { id: $org_id }
         _inc: { quota_used: $inc }
       ) { id }
     }
   `;
-  await gql(mutation, { run_id: workflowRunId, org_id: orgId, inc: callsMade });
+  await gql(mutation, { org_id: orgId, inc: amount });
+}
+
+// completeRun now only marks the run finished — quota is handled per-step
+// by incrementQuota, not batched here anymore.
+export async function completeRun(workflowRunId) {
+  const mutation = `
+    mutation CompleteRun($run_id: uuid!) {
+      update_workflow_runs_by_pk(
+        pk_columns: { id: $run_id }
+        _set: { status: "completed", finished_at: "now()" }
+      ) { id }
+    }
+  `;
+  await gql(mutation, { run_id: workflowRunId });
 }
 
 export async function failRun(workflowRunId) {
@@ -236,7 +259,6 @@ const STEP_PACING_MS = Number(process.env.STEP_PACING_MS ?? 900);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, previousOutput }) {
-  let callsMade = 0;
   let isPaused = false;
   let isFailed = false;
 
@@ -281,15 +303,19 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
     }
 
     await finishStepRun(stepRunId, { status: 'completed', output, error: null, attemptCount: attempt });
-    if (callMade) callsMade++;
+
+    // Increment quota right here, per costed step, so a pause or a later
+    // failure never loses the cost of a call that already happened.
+    if (callMade) await incrementQuota(org.id, 1);
+
     previousOutput = output;
 
     if (step.type === 'conditional_branch' && output?.result === false) {
-      // CHANGED: don't stop the run here. Pause it and wait for the user to
-      // click OK or Reject (handled by resolveBranch.js) — either choice
-      // resumes execution at the next step. This guarantees every step in
-      // the workflow eventually runs; a false condition is now a "needs a
-      // human decision" moment, not a dead end.
+      // Don't stop the run here. Pause it and wait for the user to click OK
+      // or Reject (handled by resolveBranch.js) — either choice resumes
+      // execution at the next step. This guarantees every step in the
+      // workflow eventually runs; a false condition is a "needs a human
+      // decision" moment, not a dead end.
       await pauseRunAt(workflowRunId, step.step_order);
       isPaused = true;
       break;
@@ -297,7 +323,7 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
   }
 
   if (!isPaused && !isFailed) {
-    await completeRun(workflowRunId, org.id, callsMade);
+    await completeRun(workflowRunId);
   }
 
   return {
