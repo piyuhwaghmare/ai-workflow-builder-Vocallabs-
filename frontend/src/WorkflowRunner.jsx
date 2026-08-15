@@ -80,6 +80,11 @@ const STEP_RUNS_SUBSCRIPTION = gql`
   }
 `;
 
+// NOTE: debug_log added here temporarily for tracing. Requires:
+//   ALTER TABLE workflow_runs ADD COLUMN debug_log text DEFAULT '';
+// and debug_log must be exposed in select permissions for every role
+// (owner/editor/viewer) or this subscription will error out exactly like
+// reject_count did — check Hasura Console -> workflow_runs -> Permissions.
 const RUN_STATUS_SUBSCRIPTION = gql`
   subscription WatchRunStatus($workflow_run_id: uuid!) {
     workflow_runs_by_pk(id: $workflow_run_id) {
@@ -87,6 +92,7 @@ const RUN_STATUS_SUBSCRIPTION = gql`
       status
       current_step_order
       reject_count
+      debug_log
     }
   }
 `;
@@ -106,6 +112,35 @@ function StatusPill({ status }) {
   return <span className={`pill pill--${meta.tone}`}>{meta.label}</span>;
 }
 
+// Simple always-on-screen debug panel. Shows the raw trace written by
+// workflowEngine.js into workflow_runs.debug_log, live via subscription.
+// Remove this component (and the debug_log field above) once the bug is found.
+function DebugPanel({ text }) {
+  if (!text) return null;
+  return (
+    <div
+      style={{
+        marginTop: '16px',
+        padding: '12px',
+        background: '#0d0d0d',
+        color: '#7CFC7C',
+        fontFamily: 'monospace',
+        fontSize: '12px',
+        borderRadius: '8px',
+        maxHeight: '320px',
+        overflowY: 'auto',
+        whiteSpace: 'pre-wrap',
+        border: '1px solid #333',
+      }}
+    >
+      <div style={{ color: '#aaa', marginBottom: '6px', fontWeight: 'bold' }}>
+        DEBUG TRACE (live from server)
+      </div>
+      {text}
+    </div>
+  );
+}
+
 export default function WorkflowRunner({ workflowId }) {
   const [runId, setRunId] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -121,7 +156,7 @@ export default function WorkflowRunner({ workflowId }) {
     skip: !runId,
   });
 
-  const { data: runData } = useSubscription(RUN_STATUS_SUBSCRIPTION, {
+  const { data: runData, error: runSubError } = useSubscription(RUN_STATUS_SUBSCRIPTION, {
     variables: { workflow_run_id: runId },
     skip: !runId,
   });
@@ -129,6 +164,7 @@ export default function WorkflowRunner({ workflowId }) {
   const steps = stepData?.step_runs ?? [];
   const runStatus = runData?.workflow_runs_by_pk?.status ?? null;
   const rejectCount = runData?.workflow_runs_by_pk?.reject_count ?? 0;
+  const debugLog = runData?.workflow_runs_by_pk?.debug_log ?? '';
   const pausedStep = steps.find((s) => s.status === 'paused');
   // A conditional_branch that evaluated false pauses the RUN but the step
   // itself stays "completed" (it did run — it just produced a false result).
@@ -204,6 +240,26 @@ export default function WorkflowRunner({ workflowId }) {
           {isBusy ? 'Running…' : '▶ Run workflow'}
         </button>
       </div>
+
+      {/* Surfaces the raw GraphQL subscription error directly on screen —
+          this is exactly how the reject_count issue would have shown up
+          immediately instead of needing DevTools. */}
+      {runSubError && (
+        <div
+          style={{
+            marginTop: '12px',
+            padding: '10px',
+            background: '#3a1414',
+            color: '#ff8080',
+            fontFamily: 'monospace',
+            fontSize: '12px',
+            borderRadius: '8px',
+            border: '1px solid #762020',
+          }}
+        >
+          SUBSCRIPTION ERROR: {runSubError.message}
+        </div>
+      )}
 
       {runId && (
         <div className="runner-body">
@@ -317,6 +373,8 @@ export default function WorkflowRunner({ workflowId }) {
           {runStatus === 'failed' && rejectCount < MAX_REJECTS && (
             <p className="final-msg final-msg--red">Run failed.</p>
           )}
+
+          <DebugPanel text={debugLog} />
         </div>
       )}
     </div>
