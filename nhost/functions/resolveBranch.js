@@ -2,12 +2,19 @@
 // Hasura Action handler: POST /resolveBranch
 // Input: { step_run_id, decision }  -- decision is "ok" or "reject"
 // Called when a conditional_branch evaluated false and paused the run
-// (see workflowEngine.js). EITHER decision resumes execution at the next
-// step — this action never stops the workflow, it only records which
-// choice the user made and moves on. Same Layer 2 org-role check pattern
-// as approveStep.js / rejectStep.js.
+// (see workflowEngine.js).
+//
+// CHANGED BEHAVIOR:
+// - "ok" (Approve): the false condition is ignored — execution resumes and
+//   continues through the rest of the workflow normally.
+// - "reject": this is now a deliberate STOP. The run ends right here and is
+//   marked "completed" (not "failed") with exactly the steps that already
+//   ran — no further steps are created or executed. This is treated as a
+//   legitimate, user-chosen stopping point, not an error state.
+//
+// Same Layer 2 org-role check pattern as approveStep.js / rejectStep.js.
 
-import { gql, resumeRun, executeStepsFrom } from './workflowEngine.js';
+import { gql, completeRun, resumeRun, executeStepsFrom } from './workflowEngine.js';
 
 export default async function resolveBranch(req, res) {
   if (req.method !== 'POST') {
@@ -92,38 +99,57 @@ export default async function resolveBranch(req, res) {
       return res.status(403).json({ message: 'Forbidden: Viewers cannot resolve workflow decisions.' });
     }
 
-    // Record which choice was made. Both choices continue execution — the
-    // message just documents intent for the run history / recording.
-    const note = decision === 'reject'
-      ? 'I cannot perform this one — continuing to next step.'
-      : 'Acknowledged — continuing to next step.';
+    // ---- Approve: ignore the flagged result, keep executing normally ----
+    if (decision === 'ok') {
+      await gql(
+        `mutation NoteBranchDecision($id: uuid!, $note: String!) {
+          update_step_runs_by_pk(pk_columns: { id: $id }, _set: { error: $note }) { id }
+        }`,
+        { id: step_run_id, note: 'Approved — continuing to next step.' }
+      );
 
+      // Resume the run and continue to the step AFTER the branch, carrying
+      // the branch's own output forward (same as approveStep.js does for gates).
+      await resumeRun(workflowRun.id);
+
+      const steps = workflow.workflow_steps || [];
+      const resumeIndex = steps.findIndex((s) => s.step_order === stepRun.step_order) + 1;
+
+      const result = await executeStepsFrom({
+        steps,
+        startIndex: resumeIndex,
+        workflowRunId: workflowRun.id,
+        org,
+        previousOutput: stepRun.output
+      });
+
+      return res.status(200).json({
+        success: true,
+        workflow_run_id: workflowRun.id,
+        status: result.status,
+        decision
+      });
+    }
+
+    // ---- Reject: stop the run right here, as a completed run ----
+    // No further steps are created. The run is marked "completed" (not
+    // "failed") because stopping here was a deliberate human decision, not
+    // an error — the frontend distinguishes this case via the branchStop
+    // check (a conditional_branch with result === false on a completed run).
     await gql(
       `mutation NoteBranchDecision($id: uuid!, $note: String!) {
         update_step_runs_by_pk(pk_columns: { id: $id }, _set: { error: $note }) { id }
       }`,
-      { id: step_run_id, note }
+      { id: step_run_id, note: 'Rejected — run stopped here by user decision.' }
     );
 
-    // Resume the run and continue to the step AFTER the branch, carrying the
-    // branch's own output forward (same as approveStep.js does for gates).
-    await resumeRun(workflowRun.id);
-
-    const steps = workflow.workflow_steps || [];
-    const resumeIndex = steps.findIndex((s) => s.step_order === stepRun.step_order) + 1;
-
-    const result = await executeStepsFrom({
-      steps,
-      startIndex: resumeIndex,
-      workflowRunId: workflowRun.id,
-      org,
-      previousOutput: stepRun.output
-    });
+    // No steps executed since the pause, so no additional quota calls to add.
+    await completeRun(workflowRun.id, org.id, 0);
 
     return res.status(200).json({
       success: true,
       workflow_run_id: workflowRun.id,
-      status: result.status,
+      status: 'completed',
       decision
     });
   } catch (error) {

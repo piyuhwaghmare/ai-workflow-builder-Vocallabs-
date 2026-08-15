@@ -48,6 +48,8 @@ const REJECT_STEP = gql`
   }
 `;
 
+// decision: "ok" = Approve (ignore the flagged result, keep going)
+//           "reject" = Reject (stop the run here, marked completed)
 const RESOLVE_BRANCH = gql`
   mutation ResolveBranch($step_run_id: uuid!, $decision: String!) {
     resolveBranch(step_run_id: $step_run_id, decision: $decision) {
@@ -137,8 +139,10 @@ export default function WorkflowRunner({ workflowId }) {
     : null;
   const runningStep = steps.find((s) => s.status === 'running');
 
-  // A conditional_branch that evaluated false and stopped the run early is a
-  // legitimate outcome, not a bug — surface it as one instead of just "Done".
+  // A conditional_branch that evaluated false and the user chose Reject on
+  // stops the run right there — that's a legitimate, deliberate outcome
+  // (status "completed" with fewer than the full step count), not a bug.
+  // Surface it distinctly instead of just "Done".
   const branchStop = runStatus === 'completed'
     ? steps.find((s) => s.type === 'conditional_branch' && s.output?.result === false)
     : null;
@@ -178,11 +182,12 @@ export default function WorkflowRunner({ workflowId }) {
     }
   }
 
+  // decision: 'ok' = Approve (ignore, keep going) | 'reject' = Reject (stop here)
   async function handleResolveBranch(stepRunId, decision) {
     try {
       await resolveBranch({ variables: { step_run_id: stepRunId, decision } });
     } catch (err) {
-      alert('Failed to continue: ' + err.message);
+      alert('Failed to submit decision: ' + err.message);
     }
   }
 
@@ -243,8 +248,8 @@ export default function WorkflowRunner({ workflowId }) {
           {branchPause && (
             <div className="approval-box approval-box--branch">
               <p className="approval-box-label">
-                Step {branchPause.step_order} condition not met ("{branchPause.output?.condition}") —
-                choose how to continue. Either choice moves on to the next step.
+                Step {branchPause.step_order} flagged ("{branchPause.output?.condition}") —
+                Approve to ignore it and continue, or Reject to stop the run here.
               </p>
               <div className="approval-box-actions">
                 <button
@@ -252,14 +257,14 @@ export default function WorkflowRunner({ workflowId }) {
                   onClick={() => handleResolveBranch(branchPause.id, 'ok')}
                   disabled={resolving}
                 >
-                  {resolving ? 'Continuing…' : 'OK — continue'}
+                  {resolving ? 'Working…' : '✓ Approve'}
                 </button>
                 <button
                   className="reject-button"
                   onClick={() => handleResolveBranch(branchPause.id, 'reject')}
                   disabled={resolving}
                 >
-                  {resolving ? 'Continuing…' : '✕ Reject — continue'}
+                  {resolving ? 'Working…' : '✕ Reject'}
                 </button>
               </div>
             </div>
@@ -302,8 +307,8 @@ export default function WorkflowRunner({ workflowId }) {
 
           {runStatus === 'completed' && branchStop && (
             <p className="final-msg final-msg--amber">
-              Run completed — stopped after step {branchStop.step_order} because the branch
-              condition was not met. Remaining steps were skipped by design.
+              Run completed — stopped after step {branchStop.step_order} because you chose
+              Reject on the flagged condition. Remaining steps were not run.
             </p>
           )}
           {runStatus === 'completed' && !branchStop && (
