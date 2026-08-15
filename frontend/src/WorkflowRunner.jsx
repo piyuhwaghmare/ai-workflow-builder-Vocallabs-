@@ -48,8 +48,6 @@ const REJECT_STEP = gql`
   }
 `;
 
-// decision: "ok" = Approve (ignore the flagged result, keep going)
-//           "reject" = Reject (stop the run here, marked completed)
 const RESOLVE_BRANCH = gql`
   mutation ResolveBranch($step_run_id: uuid!, $decision: String!) {
     resolveBranch(step_run_id: $step_run_id, decision: $decision) {
@@ -80,11 +78,6 @@ const STEP_RUNS_SUBSCRIPTION = gql`
   }
 `;
 
-// NOTE: debug_log added here temporarily for tracing. Requires:
-//   ALTER TABLE workflow_runs ADD COLUMN debug_log text DEFAULT '';
-// and debug_log must be exposed in select permissions for every role
-// (owner/editor/viewer) or this subscription will error out exactly like
-// reject_count did — check Hasura Console -> workflow_runs -> Permissions.
 const RUN_STATUS_SUBSCRIPTION = gql`
   subscription WatchRunStatus($workflow_run_id: uuid!) {
     workflow_runs_by_pk(id: $workflow_run_id) {
@@ -92,7 +85,6 @@ const RUN_STATUS_SUBSCRIPTION = gql`
       status
       current_step_order
       reject_count
-      debug_log
     }
   }
 `;
@@ -112,35 +104,6 @@ function StatusPill({ status }) {
   return <span className={`pill pill--${meta.tone}`}>{meta.label}</span>;
 }
 
-// Simple always-on-screen debug panel. Shows the raw trace written by
-// workflowEngine.js into workflow_runs.debug_log, live via subscription.
-// Remove this component (and the debug_log field above) once the bug is found.
-function DebugPanel({ text }) {
-  if (!text) return null;
-  return (
-    <div
-      style={{
-        marginTop: '16px',
-        padding: '12px',
-        background: '#0d0d0d',
-        color: '#7CFC7C',
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        borderRadius: '8px',
-        maxHeight: '320px',
-        overflowY: 'auto',
-        whiteSpace: 'pre-wrap',
-        border: '1px solid #333',
-      }}
-    >
-      <div style={{ color: '#aaa', marginBottom: '6px', fontWeight: 'bold' }}>
-        DEBUG TRACE (live from server)
-      </div>
-      {text}
-    </div>
-  );
-}
-
 export default function WorkflowRunner({ workflowId }) {
   const [runId, setRunId] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -156,7 +119,7 @@ export default function WorkflowRunner({ workflowId }) {
     skip: !runId,
   });
 
-  const { data: runData, error: runSubError } = useSubscription(RUN_STATUS_SUBSCRIPTION, {
+  const { data: runData } = useSubscription(RUN_STATUS_SUBSCRIPTION, {
     variables: { workflow_run_id: runId },
     skip: !runId,
   });
@@ -164,7 +127,19 @@ export default function WorkflowRunner({ workflowId }) {
   const steps = stepData?.step_runs ?? [];
   const runStatus = runData?.workflow_runs_by_pk?.status ?? null;
   const rejectCount = runData?.workflow_runs_by_pk?.reject_count ?? 0;
-  const debugLog = runData?.workflow_runs_by_pk?.debug_log ?? '';
+
+  // Total step count comes from however many rows exist once the run is
+  // fully done; while running, we don't know the true total ahead of time
+  // from this data alone, so we treat "done" as 100% and otherwise show
+  // progress against the steps seen so far plus one (the one in flight).
+  const doneCount = steps.filter((s) => s.status === 'completed' || s.status === 'failed').length;
+  const isRunFinished = runStatus === 'completed' || runStatus === 'failed';
+  const progressPercent = isRunFinished
+    ? 100
+    : steps.length > 0
+      ? Math.min(95, Math.round((doneCount / steps.length) * 100) + 10)
+      : 0;
+
   const pausedStep = steps.find((s) => s.status === 'paused');
   // A conditional_branch that evaluated false pauses the RUN but the step
   // itself stays "completed" (it did run — it just produced a false result).
@@ -175,21 +150,10 @@ export default function WorkflowRunner({ workflowId }) {
     : null;
   const runningStep = steps.find((s) => s.status === 'running');
 
-  // A conditional_branch that evaluated false and the user chose Reject on
-  // stops the run right there — that's a legitimate, deliberate outcome
-  // (status "completed" with fewer than the full step count), not a bug.
-  // IMPORTANT: must also check the recorded note (set by resolveBranch.js)
-  // to confirm the user actually chose Reject — a false result alone isn't
-  // enough, since Approve also produces result:false but continues the run
-  // to completion normally. Without this check, a fully-successful Approve
-  // run would be mislabeled as a Reject-stop.
+  // A conditional_branch that evaluated false and stopped the run early is a
+  // legitimate outcome, not a bug — surface it as one instead of just "Done".
   const branchStop = runStatus === 'completed'
-    ? steps.find(
-        (s) =>
-          s.type === 'conditional_branch' &&
-          s.output?.result === false &&
-          s.error?.startsWith('Rejected')
-      )
+    ? steps.find((s) => s.type === 'conditional_branch' && s.output?.result === false)
     : null;
 
   async function handleRun() {
@@ -227,12 +191,11 @@ export default function WorkflowRunner({ workflowId }) {
     }
   }
 
-  // decision: 'ok' = Approve (ignore, keep going) | 'reject' = Reject (stop here)
   async function handleResolveBranch(stepRunId, decision) {
     try {
       await resolveBranch({ variables: { step_run_id: stepRunId, decision } });
     } catch (err) {
-      alert('Failed to submit decision: ' + err.message);
+      alert('Failed to continue: ' + err.message);
     }
   }
 
@@ -250,31 +213,24 @@ export default function WorkflowRunner({ workflowId }) {
         </button>
       </div>
 
-      {/* Surfaces the raw GraphQL subscription error directly on screen —
-          this is exactly how the reject_count issue would have shown up
-          immediately instead of needing DevTools. */}
-      {runSubError && (
-        <div
-          style={{
-            marginTop: '12px',
-            padding: '10px',
-            background: '#3a1414',
-            color: '#ff8080',
-            fontFamily: 'monospace',
-            fontSize: '12px',
-            borderRadius: '8px',
-            border: '1px solid #762020',
-          }}
-        >
-          SUBSCRIPTION ERROR: {runSubError.message}
-        </div>
-      )}
-
       {runId && (
         <div className="runner-body">
           <div className="runner-track-header">
             <span className="track-label">Run status</span>
             {runStatus && <StatusPill status={runStatus} />}
+          </div>
+
+          <div className="progress-bar-wrap">
+            <div className="progress-bar-track">
+              <div
+                className={`progress-bar-fill ${isRunFinished ? 'progress-bar-fill--done' : ''}`}
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+            <div className="progress-bar-label">
+              <span>{doneCount} / {steps.length || '?'} steps</span>
+              <span>{progressPercent}%</span>
+            </div>
           </div>
 
           <ol className="track">
@@ -313,8 +269,8 @@ export default function WorkflowRunner({ workflowId }) {
           {branchPause && (
             <div className="approval-box approval-box--branch">
               <p className="approval-box-label">
-                Step {branchPause.step_order} flagged ("{branchPause.output?.condition}") —
-                Approve to ignore it and continue, or Reject to stop the run here.
+                Step {branchPause.step_order} condition not met ("{branchPause.output?.condition}") —
+                choose how to continue. Either choice moves on to the next step.
               </p>
               <div className="approval-box-actions">
                 <button
@@ -322,14 +278,14 @@ export default function WorkflowRunner({ workflowId }) {
                   onClick={() => handleResolveBranch(branchPause.id, 'ok')}
                   disabled={resolving}
                 >
-                  {resolving ? 'Working…' : '✓ Approve'}
+                  {resolving ? 'Continuing…' : 'OK — continue'}
                 </button>
                 <button
                   className="reject-button"
                   onClick={() => handleResolveBranch(branchPause.id, 'reject')}
                   disabled={resolving}
                 >
-                  {resolving ? 'Working…' : '✕ Reject'}
+                  {resolving ? 'Continuing…' : '✕ Reject — continue'}
                 </button>
               </div>
             </div>
@@ -372,8 +328,8 @@ export default function WorkflowRunner({ workflowId }) {
 
           {runStatus === 'completed' && branchStop && (
             <p className="final-msg final-msg--amber">
-              Run completed — stopped after step {branchStop.step_order} because you chose
-              Reject on the flagged condition. Remaining steps were not run.
+              Run completed — stopped after step {branchStop.step_order} because the branch
+              condition was not met. Remaining steps were skipped by design.
             </p>
           )}
           {runStatus === 'completed' && !branchStop && (
@@ -382,8 +338,6 @@ export default function WorkflowRunner({ workflowId }) {
           {runStatus === 'failed' && rejectCount < MAX_REJECTS && (
             <p className="final-msg final-msg--red">Run failed.</p>
           )}
-
-          <DebugPanel text={debugLog} />
         </div>
       )}
     </div>

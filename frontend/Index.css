@@ -1,54 +1,81 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  /* Control-room palette — dark instrument panel, not decorative gloom.
-     Justified by the subject: this is a live execution monitor, and
-     operators read it the way they'd read a rack of status lights. */
-  --bg-deep: #0B0E13;
-  --surface: #12161D;
-  --surface-raised: #171C25;
-  --border: #232A35;
-  --text-primary: #E7EAEE;
-  --text-muted: #8B94A3;
+  /* Canvas + surfaces */
+  --bg: #0a0d14;
+  --bg-gradient: radial-gradient(ellipse 1200px 600px at 50% -10%, #131a2b 0%, #0a0d14 60%);
+  --surface: #131722;
+  --surface-raised: #1b2130;
+  --border: #262d3d;
 
-  --amber: #F0A639;   /* paused / awaiting a human */
-  --amber-dim: #3A2E15;
-  --teal: #35D0C0;    /* actively running */
-  --teal-dim: #103330;
-  --green: #3ECF8E;   /* completed */
-  --green-dim: #123425;
-  --red: #F0555C;     /* failed */
-  --red-dim: #351417;
-  --muted-chip: #2A313D;
+  /* Text */
+  --text-primary: #edeff5;
+  --text-muted: #8b93a7;
 
-  --font-display: 'Space Grotesk', sans-serif;
-  --font-body: 'Inter', sans-serif;
-  --font-mono: 'IBM Plex Mono', monospace;
+  /* Status colors — functional, not decorative. Each maps to exactly one run state. */
+  --teal: #2fd9c4;
+  --teal-dim: rgba(47, 217, 196, 0.14);
+  --amber: #ffb454;
+  --amber-dim: rgba(255, 180, 84, 0.14);
+  --green: #4ade80;
+  --green-dim: rgba(74, 222, 128, 0.14);
+  --red: #ff6b6b;
+  --red-dim: rgba(255, 107, 107, 0.14);
+  --muted-chip: #1f2531;
+
+  /* Signature accent — brand/header only, never a run state */
+  --violet: #7c8cff;
+  --violet-dim: rgba(124, 140, 255, 0.16);
+
+  /* Type */
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
 }
 
-body {
+html, body {
   margin: 0;
-  background: var(--bg-deep);
+  padding: 0;
+}
+
+body {
+  background: var(--bg-gradient), var(--bg);
+  background-attachment: fixed;
   color: var(--text-primary);
   font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
 }
 
 button {
   font-family: inherit;
 }
 
-:focus-visible {
+/* Visible keyboard focus everywhere — not just mouse hover */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
   outline: 2px solid var(--teal);
   outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
 }

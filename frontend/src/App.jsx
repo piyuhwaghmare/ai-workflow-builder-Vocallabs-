@@ -1,14 +1,20 @@
+import { useState, useEffect } from 'react';
 import { useAuth } from './AuthProvider';
 import SignIn from './SignIn';
+import Header from './Header';
+import WorkflowSelector from './WorkflowSelector';
 import WorkflowRunner from './WorkflowRunner';
 import './App.css';
 
-// Swap this for a real workflow selector once you have a list screen —
-// for now it's the one you're demoing against.
-const testWorkflowId = '1ee438ed-5a6e-478c-9620-ac41f5848fe3';
-
 export default function App() {
   const { isAuthenticated, user, signOut } = useAuth();
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState(null);
+
+  // A stale selection from a previous session shouldn't carry into the next
+  // login — especially across different users/orgs.
+  useEffect(() => {
+    if (!isAuthenticated) setSelectedWorkflowId(null);
+  }, [isAuthenticated]);
 
   if (!isAuthenticated) {
     return <SignIn />;
@@ -16,18 +22,15 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <p className="app-eyebrow">AI Workflow Dashboard</p>
-          <h1 className="app-title">Signed in as {user?.email}</h1>
-        </div>
-        <button className="app-signout" onClick={() => signOut()}>
-          Sign out
-        </button>
-      </header>
+      <Header email={user?.email} onSignOut={signOut} />
 
-      <main className="app-main">
-        <WorkflowRunner workflowId={testWorkflowId} />
+      <main className="app-main-column">
+        <WorkflowSelector selectedId={selectedWorkflowId} onSelect={setSelectedWorkflowId} />
+        {selectedWorkflowId ? (
+          <WorkflowRunner workflowId={selectedWorkflowId} />
+        ) : (
+          <p className="selector-status">Pick a workflow above to run it.</p>
+        )}
       </main>
     </div>
   );

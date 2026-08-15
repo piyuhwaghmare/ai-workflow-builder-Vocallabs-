@@ -1,10 +1,13 @@
 .runner {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 24px;
-  max-width: 480px;
-  font-family: var(--font-body);
+  background: var(--surface, #131722);
+  border: 1px solid var(--border, #262d3d);
+  border-radius: 14px;
+  padding: 26px;
+  width: 100%;
+  max-width: 520px;
+  font-family: var(--font-body, 'Inter', sans-serif);
+  color: var(--text-primary, #edeff5);
+  box-shadow: 0 20px 50px -24px rgba(0, 0, 0, 0.6);
 }
 
 .runner-header {
@@ -13,40 +16,42 @@
   justify-content: space-between;
   gap: 16px;
   padding-bottom: 20px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border, #262d3d);
 }
 
 .runner-eyebrow {
   margin: 0 0 4px;
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, monospace);
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--text-muted, #8b93a7);
 }
 
 .runner-title {
   margin: 0;
-  font-family: var(--font-display);
-  font-size: 20px;
+  font-family: var(--font-display, sans-serif);
+  font-size: 21px;
   font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary, #edeff5);
 }
 
 .run-button {
-  background: var(--teal);
-  color: #08201C;
+  background: var(--teal, #2fd9c4);
+  color: #08201c;
   border: none;
-  border-radius: 6px;
-  padding: 10px 16px;
+  border-radius: 8px;
+  padding: 10px 18px;
   font-weight: 600;
   font-size: 14px;
   cursor: pointer;
   white-space: nowrap;
-  transition: opacity 0.15s ease;
+  transition: opacity 0.15s ease, transform 0.1s ease;
 }
 
 .run-button:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -54,27 +59,74 @@
   opacity: 0.88;
 }
 
+.run-button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
 .runner-body {
-  padding-top: 20px;
+  padding-top: 22px;
 }
 
 .runner-track-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .track-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, monospace);
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--text-muted, #8b93a7);
 }
 
-/* The signature element: a vertical rail connecting each step, like a
-   pipeline schematic. Each node is a stop on the rail with its own
-   status light — this encodes the thing that's actually true about
-   the content: steps run in a fixed order, one after another. */
+/* --- Progress bar: "high level canvas" while the run is moving through
+   steps — animated striped fill, glows at the leading edge, percent label. */
+.progress-bar-wrap {
+  margin-bottom: 20px;
+}
+
+.progress-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--muted-chip, #1f2531);
+  border: 1px solid var(--border, #262d3d);
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--teal, #2fd9c4), var(--violet, #7c8cff));
+  background-size: 200% 100%;
+  animation: stripe-move 2.2s linear infinite;
+  box-shadow: 0 0 12px 1px rgba(47, 217, 196, 0.55);
+  transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.progress-bar-fill--done {
+  background: linear-gradient(90deg, var(--green, #4ade80), var(--teal, #2fd9c4));
+  animation: none;
+  box-shadow: 0 0 10px 1px rgba(74, 222, 128, 0.45);
+}
+
+@keyframes stripe-move {
+  0% { background-position: 0% 0%; }
+  100% { background-position: 200% 0%; }
+}
+
+.progress-bar-label {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted, #8b93a7);
+}
+
+/* --- Rail: connecting line under each node inherits that node's own status
+   color, so the rail visibly lights up top-to-bottom as steps complete. */
 .track {
   list-style: none;
   margin: 0;
@@ -86,8 +138,14 @@
   position: relative;
   display: flex;
   gap: 14px;
-  padding-bottom: 20px;
+  padding-bottom: 22px;
   padding-left: 2px;
+  animation: node-in 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes node-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .track-node:not(:last-child)::before {
@@ -97,7 +155,21 @@
   top: 32px;
   bottom: 0;
   width: 2px;
-  background: var(--border);
+  background: var(--border, #262d3d);
+  transition: background 0.4s ease;
+}
+
+.track-node--green:not(:last-child)::before,
+.track-node--teal:not(:last-child)::before {
+  background: linear-gradient(180deg, var(--teal, #2fd9c4), var(--green, #4ade80));
+}
+
+.track-node--amber:not(:last-child)::before {
+  background: linear-gradient(180deg, var(--teal, #2fd9c4), var(--amber, #ffb454));
+}
+
+.track-node--red:not(:last-child)::before {
+  background: linear-gradient(180deg, var(--teal, #2fd9c4), var(--red, #ff6b6b));
 }
 
 .track-node-marker {
@@ -108,40 +180,61 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, monospace);
   font-size: 13px;
   font-weight: 500;
-  border: 2px solid var(--border);
-  background: var(--surface-raised);
+  border: 2px solid var(--border, #262d3d);
+  background: var(--surface-raised, #1b2130);
+  color: var(--text-primary, #edeff5);
   z-index: 1;
+  overflow: hidden;
+  position: relative;
+  transition: border-color 0.3s ease, color 0.3s ease, background 0.3s ease;
 }
 
 .track-node--teal .track-node-marker {
-  border-color: var(--teal);
-  color: var(--teal);
+  border-color: var(--teal, #2fd9c4);
+  color: var(--teal, #2fd9c4);
   animation: pulse-ring 1.6s ease-in-out infinite;
 }
 
+/* Shimmer sweep across the active node — the "something is actively
+   happening" cue, distinct from the static pulse ring alone. */
+.track-node--teal .track-node-marker::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 20%, rgba(47, 217, 196, 0.45) 50%, transparent 80%);
+  background-size: 250% 250%;
+  animation: shimmer-sweep 1.4s linear infinite;
+}
+
+@keyframes shimmer-sweep {
+  0% { background-position: 200% 200%; }
+  100% { background-position: -50% -50%; }
+}
+
 .track-node--amber .track-node-marker {
-  border-color: var(--amber);
-  color: var(--amber);
+  border-color: var(--amber, #ffb454);
+  background: var(--amber-dim, rgba(255, 180, 84, 0.14));
+  color: var(--amber, #ffb454);
 }
 
 .track-node--green .track-node-marker {
-  border-color: var(--green);
-  background: var(--green-dim);
-  color: var(--green);
+  border-color: var(--green, #4ade80);
+  background: var(--green-dim, rgba(74, 222, 128, 0.14));
+  color: var(--green, #4ade80);
 }
 
 .track-node--red .track-node-marker {
-  border-color: var(--red);
-  background: var(--red-dim);
-  color: var(--red);
+  border-color: var(--red, #ff6b6b);
+  background: var(--red-dim, rgba(255, 107, 107, 0.14));
+  color: var(--red, #ff6b6b);
 }
 
 @keyframes pulse-ring {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(53, 208, 192, 0.35); }
-  50% { box-shadow: 0 0 0 5px rgba(53, 208, 192, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47, 217, 196, 0.35); }
+  50% { box-shadow: 0 0 0 6px rgba(47, 217, 196, 0); }
 }
 
 .track-node-body {
@@ -157,22 +250,22 @@
 }
 
 .track-node-type {
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, monospace);
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--text-primary, #edeff5);
 }
 
 .track-node-meta {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--text-muted, #8b93a7);
 }
 
 .track-node-error {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--red);
-  font-family: var(--font-mono);
+  color: var(--red, #ff6b6b);
+  font-family: var(--font-mono, monospace);
 }
 
 .pill {
@@ -181,40 +274,57 @@
   padding: 2px 9px;
   border-radius: 999px;
   font-size: 11px;
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, monospace);
   font-weight: 500;
   letter-spacing: 0.02em;
 }
 
-.pill--muted { background: var(--muted-chip); color: var(--text-muted); }
-.pill--teal { background: var(--teal-dim); color: var(--teal); }
-.pill--amber { background: var(--amber-dim); color: var(--amber); }
-.pill--green { background: var(--green-dim); color: var(--green); }
-.pill--red { background: var(--red-dim); color: var(--red); }
+.pill--muted { background: var(--muted-chip, #1f2531); color: var(--text-muted, #8b93a7); }
+.pill--teal { background: var(--teal-dim, rgba(47,217,196,0.14)); color: var(--teal, #2fd9c4); }
+.pill--amber { background: var(--amber-dim, rgba(255,180,84,0.14)); color: var(--amber, #ffb454); }
+.pill--green { background: var(--green-dim, rgba(74,222,128,0.14)); color: var(--green, #4ade80); }
+.pill--red { background: var(--red-dim, rgba(255,107,107,0.14)); color: var(--red, #ff6b6b); }
 
 .approval-box {
-  margin-top: 4px;
-  padding: 14px 16px;
-  border: 1px solid var(--amber);
-  background: var(--amber-dim);
-  border-radius: 8px;
+  margin-top: 6px;
+  padding: 16px;
+  border: 1px solid var(--amber, #ffb454);
+  background: var(--amber-dim, rgba(255,180,84,0.14));
+  border-radius: 10px;
+  animation: node-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.approval-box--branch {
+  border-color: var(--violet, #7c8cff);
+  background: var(--violet-dim, rgba(124,140,255,0.16));
 }
 
 .approval-box-label {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   font-size: 13px;
-  color: var(--amber);
+  line-height: 1.5;
+  color: var(--text-primary, #edeff5);
+}
+
+.approval-box-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .approve-button {
-  background: var(--amber);
-  color: #241A05;
+  background: var(--amber, #ffb454);
+  color: #241a05;
   border: none;
-  border-radius: 6px;
-  padding: 9px 14px;
+  border-radius: 7px;
+  padding: 10px 16px;
   font-weight: 600;
   font-size: 13px;
   cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.approve-button:hover:not(:disabled) {
+  opacity: 0.88;
 }
 
 .approve-button:disabled {
@@ -222,32 +332,20 @@
   cursor: not-allowed;
 }
 
-.final-msg {
-  margin: 16px 0 0;
-  font-family: var(--font-mono);
-  font-size: 13px;
-}
-
-.final-msg--green { color: var(--green); }
-.final-msg--red { color: var(--red); }
-
-/* Add these rules to WorkflowRunner.css */
-.final-msg--amber { color: var(--amber); }
-
-.approval-box-actions {
-  display: flex;
-  gap: 8px;
-}
-
 .reject-button {
   background: transparent;
-  color: var(--red);
-  border: 1px solid var(--red);
-  border-radius: 6px;
-  padding: 9px 14px;
+  color: var(--red, #ff6b6b);
+  border: 1px solid var(--red, #ff6b6b);
+  border-radius: 7px;
+  padding: 10px 16px;
   font-weight: 600;
   font-size: 13px;
   cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.reject-button:hover:not(:disabled) {
+  background: var(--red-dim, rgba(255,107,107,0.14));
 }
 
 .reject-button:disabled {
@@ -255,7 +353,30 @@
   cursor: not-allowed;
 }
 
-@media (max-width: 480px) {
+.final-msg {
+  margin: 18px 0 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+
+.final-msg--green {
+  color: var(--green, #4ade80);
+  background: var(--green-dim, rgba(74,222,128,0.14));
+}
+
+.final-msg--red {
+  color: var(--red, #ff6b6b);
+  background: var(--red-dim, rgba(255,107,107,0.14));
+}
+
+.final-msg--amber {
+  color: var(--amber, #ffb454);
+  background: var(--amber-dim, rgba(255,180,84,0.14));
+}
+
+@media (max-width: 560px) {
   .runner {
     max-width: 100%;
   }
