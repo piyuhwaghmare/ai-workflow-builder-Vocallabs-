@@ -178,9 +178,18 @@ export default function WorkflowRunner({ workflowId }) {
   // A conditional_branch that evaluated false and the user chose Reject on
   // stops the run right there — that's a legitimate, deliberate outcome
   // (status "completed" with fewer than the full step count), not a bug.
-  // Surface it distinctly instead of just "Done".
+  // IMPORTANT: must also check the recorded note (set by resolveBranch.js)
+  // to confirm the user actually chose Reject — a false result alone isn't
+  // enough, since Approve also produces result:false but continues the run
+  // to completion normally. Without this check, a fully-successful Approve
+  // run would be mislabeled as a Reject-stop.
   const branchStop = runStatus === 'completed'
-    ? steps.find((s) => s.type === 'conditional_branch' && s.output?.result === false)
+    ? steps.find(
+        (s) =>
+          s.type === 'conditional_branch' &&
+          s.output?.result === false &&
+          s.error?.startsWith('Rejected')
+      )
     : null;
 
   async function handleRun() {

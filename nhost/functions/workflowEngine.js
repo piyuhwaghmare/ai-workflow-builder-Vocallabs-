@@ -1,10 +1,7 @@
-// workflowEngine.js  (DEBUG BUILD — traces execution into workflow_runs.debug_log
-// so it's visible live on the FRONTEND, since server console logs aren't reachable
-// right now. Once the bug is found, swap back to the clean version — this build
-// does extra DB writes purely for tracing and isn't meant to stay in production.)
-//
-// Requires: ALTER TABLE workflow_runs ADD COLUMN debug_log text DEFAULT '';
-// and debug_log exposed in select permissions for every role.
+// workflowEngine.js
+// Shared logic used by BOTH Action handlers: executeWorkflowRun.js and approveStep.js
+// Keeping this in one place means "resume after approval" behaves identically to
+// "run from the start" — same retry rules, same step_runs bookkeeping, same quota logic.
 
 const GRAPHQL_URL = process.env.NHOST_GRAPHQL_URL;
 const ADMIN_SECRET = process.env.NHOST_ADMIN_SECRET;
@@ -29,39 +26,6 @@ export async function gql(query, variables) {
     throw new Error(data.errors[0].message);
   }
   return data.data;
-}
-
-// ---------- debug trace helper ----------
-// Writes the full accumulated log (as one text blob) into workflow_runs.debug_log.
-// The frontend subscription picks this up live, same as any other column change.
-// Failures here are swallowed (never let tracing break the actual run).
-async function flushDebug(workflowRunId, lines) {
-  if (!workflowRunId) return;
-  const text = lines.join('\n');
-  try {
-    await gql(
-      `mutation SetDebugLog($run_id: uuid!, $log: String!) {
-        update_workflow_runs_by_pk(pk_columns: { id: $run_id }, _set: { debug_log: $log }) { id }
-      }`,
-      { run_id: workflowRunId, log: text }
-    );
-  } catch (e) {
-    console.error('[flushDebug] failed to write debug_log:', e.message);
-  }
-}
-
-function makeLogger(workflowRunId) {
-  const lines = [];
-  return {
-    lines,
-    async log(msg) {
-      const stamp = new Date().toISOString().slice(11, 19);
-      const line = `[${stamp}] ${msg}`;
-      lines.push(line);
-      console.log(line);
-      await flushDebug(workflowRunId, lines);
-    }
-  };
 }
 
 // ---------- step_runs helpers ----------
@@ -157,6 +121,7 @@ export async function failRun(workflowRunId) {
 }
 
 // ---------- per-step-type execution ----------
+// Returns { output, callMade } — callMade=true counts against org quota (llm_call / http_request only)
 export async function runStepLogic(step, previousOutput) {
   switch (step.type) {
     case 'llm_call': {
@@ -182,14 +147,31 @@ export async function runStepLogic(step, previousOutput) {
         const json = await resp.json();
         text = json.choices?.[0]?.message?.content ?? '';
       } else {
-        await new Promise((r) => setTimeout(r, 1000));
-        text = 'negative — the customer reports the product stopped working after two days';
+        // Stubbed fallback — disclosed artificial delay, matched to the
+        // support-ticket-triage prompt this step now asks for, so the demo
+        // shows a realistic multi-part response instead of one bare line.
+        // LLM_STUB_DELAY_MS is separate from STEP_PACING_MS (which applies
+        // to every step type) — this one specifically represents "the model
+        // is generating a response."
+        const delay = Number(process.env.LLM_STUB_DELAY_MS ?? 2500);
+        await new Promise((r) => setTimeout(r, delay));
+        text = [
+          'Summary: Customer reports the product stopped working after two days of use.',
+          'Sentiment: negative',
+          'Urgency: high',
+          'Category: technical'
+        ].join('\n');
       }
 
+      // Derive structured fields from the text so downstream steps
+      // (conditional_branch, notify) have real, checkable values instead of
+      // relying on the LLM returning perfectly structured JSON unprompted.
       const lower = text.toLowerCase();
       const sentiment = lower.includes('negative') ? 'negative' : lower.includes('positive') ? 'positive' : 'neutral';
+      const urgency = lower.includes('urgency: high') ? 'high' : lower.includes('urgency: medium') ? 'medium' : 'low';
+      const category = ['billing', 'technical', 'account'].find((c) => lower.includes(`category: ${c}`)) || 'other';
 
-      return { output: { text, sentiment }, callMade: true };
+      return { output: { text, sentiment, urgency, category }, callMade: true };
     }
 
     case 'http_request': {
@@ -210,6 +192,8 @@ export async function runStepLogic(step, previousOutput) {
     }
 
     case 'notify': {
+      // Real delivery (Slack/email) is handled by a Hasura Event Trigger watching
+      // inserts on step_runs where type = 'notify' — this just records the intent.
       return { output: { notified: true, channel: step.config?.slack_channel ?? null }, callMade: false };
     }
 
@@ -240,34 +224,33 @@ function evaluateCondition(condition, previousOutput) {
 }
 
 // ---------- the shared execution loop ----------
+// Runs steps starting at startIndex (0-based) in `steps`. Used both for a fresh run
+// (startIndex = 0) and for resuming after an approval_gate (startIndex = gate + 1).
+// `previousOutput` should be the output of the step immediately before startIndex
+// (null if starting from the very first step).
+// Small artificial pacing delay between steps, purely so the live subscription
+// UI has a visible "running" window per step instead of the whole run resolving
+// in under a second. Disclosed here rather than hidden — same idea as the
+// llm_call stub's delay. Set STEP_PACING_MS=0 to disable.
 const STEP_PACING_MS = Number(process.env.STEP_PACING_MS ?? 900);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, previousOutput }) {
-  const { log } = makeLogger(workflowRunId);
-
-  await log(`=== executeStepsFrom START — run=${workflowRunId} startIndex=${startIndex} totalSteps=${steps.length} ===`);
-  await log(`Step order: ${steps.map(s => `${s.step_order}:${s.type}`).join(' -> ')}`);
-
   let callsMade = 0;
   let isPaused = false;
   let isFailed = false;
 
   for (let i = startIndex; i < steps.length; i++) {
     const step = steps[i];
-    await log(`---- LOOP i=${i} step_order=${step.step_order} type=${step.type} ----`);
-
     const stepRunId = await createStepRun(workflowRunId, step, previousOutput);
-    await log(`created step_run id=${stepRunId}`);
-
+    // "running" row is now visible to subscribers — hold here briefly before
+    // doing the actual work so the UI has time to render the transition.
     if (STEP_PACING_MS > 0) await sleep(STEP_PACING_MS);
 
     if (step.type === 'approval_gate') {
-      await log(`step is approval_gate → pausing run and breaking loop`);
       await pauseRunAt(workflowRunId, step.step_order);
       await finishStepRun(stepRunId, { status: 'paused', output: null, error: null, attemptCount: 0 });
       isPaused = true;
-      await log(`pauseRunAt done. isPaused=true`);
       break;
     }
 
@@ -284,16 +267,13 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
         output = result.output;
         callMade = result.callMade;
         lastError = null;
-        await log(`attempt ${attempt}/${maxAttempts} SUCCEEDED, output=${JSON.stringify(output)}`);
         break;
       } catch (e) {
         lastError = e.message;
-        await log(`attempt ${attempt}/${maxAttempts} FAILED: ${e.message}`);
       }
     }
 
     if (lastError) {
-      await log(`step_order=${step.step_order} exhausted retries → marking run FAILED`);
       await finishStepRun(stepRunId, { status: 'failed', output: null, error: lastError, attemptCount: attempt });
       await failRun(workflowRunId);
       isFailed = true;
@@ -303,32 +283,24 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
     await finishStepRun(stepRunId, { status: 'completed', output, error: null, attemptCount: attempt });
     if (callMade) callsMade++;
     previousOutput = output;
-    await log(`step_order=${step.step_order} marked completed. previousOutput=${JSON.stringify(previousOutput)}`);
 
     if (step.type === 'conditional_branch' && output?.result === false) {
-      await log(`★★★ CONDITIONAL BRANCH FALSE at step_order=${step.step_order} — pausing run for decision ★★★`);
+      // CHANGED: don't stop the run here. Pause it and wait for the user to
+      // click OK or Reject (handled by resolveBranch.js) — either choice
+      // resumes execution at the next step. This guarantees every step in
+      // the workflow eventually runs; a false condition is now a "needs a
+      // human decision" moment, not a dead end.
       await pauseRunAt(workflowRunId, step.step_order);
       isPaused = true;
-      await log(`pauseRunAt done. isPaused=true — breaking loop`);
       break;
-    } else if (step.type === 'conditional_branch') {
-      await log(`conditional_branch result=${output?.result} (not false) — continuing normally`);
     }
   }
 
-  await log(`LOOP ENDED. isPaused=${isPaused} isFailed=${isFailed}`);
-
   if (!isPaused && !isFailed) {
-    await log(`neither paused nor failed → calling completeRun`);
     await completeRun(workflowRunId, org.id, callsMade);
-  } else {
-    await log(`SKIPPING completeRun (isPaused=${isPaused} isFailed=${isFailed})`);
   }
 
-  const finalStatus = isPaused ? 'paused' : isFailed ? 'failed' : 'completed';
-  await log(`=== executeStepsFrom END — returning status="${finalStatus}" ===`);
-
   return {
-    status: finalStatus
+    status: isPaused ? 'paused' : isFailed ? 'failed' : 'completed'
   };
 }
