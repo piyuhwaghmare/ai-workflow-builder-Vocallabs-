@@ -2,9 +2,15 @@
 // Hasura Action handler: POST /approveStep
 // Input: { step_run_id }
 // Checks the approver's role in the OWNING org (Layer 2), then resumes the run.
-// CHANGED: also resets workflow_runs.reject_count to 0 on approval, since the
+// Also resets workflow_runs.reject_count to 0 on approval, since the
 // "3 rejects in a row" rule (see rejectStep.js) is about a consecutive streak,
 // not a lifetime total.
+//
+// FIX: now fetches stepRun.input and passes it as previousOutput on resume,
+// instead of hardcoding null. The input to the approval_gate step IS the
+// output of the step immediately before it, so this is what any step AFTER
+// the gate (e.g. a conditional_branch or notify) needs to see real data
+// instead of null.
 
 import { gql, resumeRun, executeStepsFrom } from './workflowEngine.js';
 
@@ -37,6 +43,7 @@ export default async function approveStep(req, res) {
           id
           status
           step_order
+          input
           workflow_run {
             id
             status
@@ -120,7 +127,7 @@ export default async function approveStep(req, res) {
       startIndex: resumeIndex,
       workflowRunId: workflowRun.id,
       org,
-      previousOutput: null
+      previousOutput: stepRun.input
     });
 
     return res.status(200).json({
