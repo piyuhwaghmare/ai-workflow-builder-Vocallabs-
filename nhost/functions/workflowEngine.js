@@ -226,7 +226,6 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
   let callsMade = 0;
   let isPaused = false;
   let isFailed = false;
-  let stoppedEarly = false;
 
   for (let i = startIndex; i < steps.length; i++) {
     const step = steps[i];
@@ -273,7 +272,13 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
     previousOutput = output;
 
     if (step.type === 'conditional_branch' && output?.result === false) {
-      stoppedEarly = true;
+      // CHANGED: don't stop the run here. Pause it and wait for the user to
+      // click OK or Reject (handled by resolveBranch.js) — either choice
+      // resumes execution at the next step. This guarantees every step in
+      // the workflow eventually runs; a false condition is now a "needs a
+      // human decision" moment, not a dead end.
+      await pauseRunAt(workflowRunId, step.step_order);
+      isPaused = true;
       break;
     }
   }
@@ -283,7 +288,6 @@ export async function executeStepsFrom({ steps, startIndex, workflowRunId, org, 
   }
 
   return {
-    status: isPaused ? 'paused' : isFailed ? 'failed' : 'completed',
-    stoppedEarly
+    status: isPaused ? 'paused' : isFailed ? 'failed' : 'completed'
   };
 }

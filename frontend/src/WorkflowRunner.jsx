@@ -48,6 +48,17 @@ const REJECT_STEP = gql`
   }
 `;
 
+const RESOLVE_BRANCH = gql`
+  mutation ResolveBranch($step_run_id: uuid!, $decision: String!) {
+    resolveBranch(step_run_id: $step_run_id, decision: $decision) {
+      success
+      status
+      workflow_run_id
+      decision
+    }
+  }
+`;
+
 const STEP_RUNS_SUBSCRIPTION = gql`
   subscription WatchStepRuns($workflow_run_id: uuid!) {
     step_runs(
@@ -101,6 +112,7 @@ export default function WorkflowRunner({ workflowId }) {
   const [executeWorkflow] = useMutation(EXECUTE_WORKFLOW);
   const [approveStep, { loading: approving }] = useMutation(APPROVE_STEP);
   const [rejectStep, { loading: rejecting }] = useMutation(REJECT_STEP);
+  const [resolveBranch, { loading: resolving }] = useMutation(RESOLVE_BRANCH);
 
   const { data: stepData } = useSubscription(STEP_RUNS_SUBSCRIPTION, {
     variables: { workflow_run_id: runId },
@@ -116,6 +128,13 @@ export default function WorkflowRunner({ workflowId }) {
   const runStatus = runData?.workflow_runs_by_pk?.status ?? null;
   const rejectCount = runData?.workflow_runs_by_pk?.reject_count ?? 0;
   const pausedStep = steps.find((s) => s.status === 'paused');
+  // A conditional_branch that evaluated false pauses the RUN but the step
+  // itself stays "completed" (it did run — it just produced a false result).
+  // Distinguish it from approval_gate pauses by type + result, and only
+  // treat it as "awaiting a decision" if it hasn't been resolved yet (no note).
+  const branchPause = runStatus === 'paused'
+    ? steps.find((s) => s.type === 'conditional_branch' && s.output?.result === false && !s.error)
+    : null;
   const runningStep = steps.find((s) => s.status === 'running');
 
   // A conditional_branch that evaluated false and stopped the run early is a
@@ -156,6 +175,14 @@ export default function WorkflowRunner({ workflowId }) {
       await rejectStep({ variables: { step_run_id: stepRunId } });
     } catch (err) {
       alert('Reject failed: ' + err.message);
+    }
+  }
+
+  async function handleResolveBranch(stepRunId, decision) {
+    try {
+      await resolveBranch({ variables: { step_run_id: stepRunId, decision } });
+    } catch (err) {
+      alert('Failed to continue: ' + err.message);
     }
   }
 
@@ -212,6 +239,31 @@ export default function WorkflowRunner({ workflowId }) {
             {/* Placeholder rail entries for steps not yet started, so the full
                 path is visible even before those rows exist in step_runs. */}
           </ol>
+
+          {branchPause && (
+            <div className="approval-box approval-box--branch">
+              <p className="approval-box-label">
+                Step {branchPause.step_order} condition not met ("{branchPause.output?.condition}") —
+                choose how to continue. Either choice moves on to the next step.
+              </p>
+              <div className="approval-box-actions">
+                <button
+                  className="approve-button"
+                  onClick={() => handleResolveBranch(branchPause.id, 'ok')}
+                  disabled={resolving}
+                >
+                  {resolving ? 'Continuing…' : 'OK — continue'}
+                </button>
+                <button
+                  className="reject-button"
+                  onClick={() => handleResolveBranch(branchPause.id, 'reject')}
+                  disabled={resolving}
+                >
+                  {resolving ? 'Continuing…' : '✕ Reject — continue'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {pausedStep && (
             <div className="approval-box">
